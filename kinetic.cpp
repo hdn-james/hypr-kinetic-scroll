@@ -115,28 +115,38 @@ void KineticState::onAxis(IPointer::SAxisEvent& e) {
     m_scrollTargetWindowKey = targetKeys.windowKey;
     m_scrollTargetSurfaceKey = targetKeys.surfaceKey;
 
-    constexpr double alpha = 0.3;
-    uint32_t         dt    = e.timeMs - m_lastEventMs;
+    constexpr double alpha        = 0.4;
+    constexpr double resumeAlpha  = 0.5;
+    uint32_t         dt           = e.timeMs - m_lastEventMs;
 
-    if (m_lastEventMs > 0 && dt > 0 && dt < 200) {
-        // Exponential smoothing of deltas
+    if (resumedFromDecay) {
+        double a = resumeAlpha;
+        if (e.axis == WL_POINTER_AXIS_VERTICAL_SCROLL)
+            m_velocityV = a * scaledDelta + (1.0 - a) * m_velocityV;
+        else
+            m_velocityH = a * scaledDelta + (1.0 - a) * m_velocityH;
+        m_gestureStartMs = e.timeMs;
+        m_peakVelocityV = std::abs(m_velocityV);
+        m_peakVelocityH = std::abs(m_velocityH);
+    } else if (m_lastEventMs > 0 && dt > 0 && dt < 200) {
         if (e.axis == WL_POINTER_AXIS_VERTICAL_SCROLL)
             m_velocityV = alpha * scaledDelta + (1.0 - alpha) * m_velocityV;
         else
             m_velocityH = alpha * scaledDelta + (1.0 - alpha) * m_velocityH;
-    } else if (resumedFromDecay) {
-        // Continue inertia: add new gesture impulse on top of remaining momentum
-        if (e.axis == WL_POINTER_AXIS_VERTICAL_SCROLL)
-            m_velocityV += scaledDelta;
-        else
-            m_velocityH += scaledDelta;
     } else {
-        // First event or large gap - seed velocity directly
         if (e.axis == WL_POINTER_AXIS_VERTICAL_SCROLL)
             m_velocityV = scaledDelta;
         else
             m_velocityH = scaledDelta;
+        m_gestureStartMs = e.timeMs;
+        m_peakVelocityV = 0.0;
+        m_peakVelocityH = 0.0;
     }
+
+    if (std::abs(m_velocityV) > m_peakVelocityV)
+        m_peakVelocityV = std::abs(m_velocityV);
+    if (std::abs(m_velocityH) > m_peakVelocityH)
+        m_peakVelocityH = std::abs(m_velocityH);
 
     m_lastEventMs = e.timeMs;
 
@@ -211,6 +221,20 @@ int KineticState::onStopTimer(void* data) {
         self->m_tracking = false;
         return 0;
     }
+
+    // Boost final velocity using peak velocity from the gesture.
+    // A long fast swipe will have a high peak that persists; a short
+    // flick will have peak ≈ current velocity, so no extra boost.
+    constexpr double peakBlend = 0.35;
+    double peakV = self->m_peakVelocityV;
+    double peakH = self->m_peakVelocityH;
+    double signV = (self->m_velocityV >= 0) ? 1.0 : -1.0;
+    double signH = (self->m_velocityH >= 0) ? 1.0 : -1.0;
+
+    double boostedV = std::abs(self->m_velocityV) + peakBlend * peakV;
+    double boostedH = std::abs(self->m_velocityH) + peakBlend * peakH;
+    self->m_velocityV = signV * boostedV;
+    self->m_velocityH = signH * boostedH;
 
     // Finger lifted - begin kinetic decay
     self->m_tracking = false;
